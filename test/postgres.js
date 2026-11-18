@@ -18,6 +18,7 @@ export async function verifyPostgres(connectionString,{ssl=true}={}) {
     db=new pg.Pool({connectionString,ssl:ssl?{rejectUnauthorized:true}:undefined,max:5,options:`-c search_path=${schema}`});
     await db.query(await readFile(new URL('../db/001-init.sql',import.meta.url),'utf8'));
     await db.query(await readFile(new URL('../db/002-v2.sql',import.meta.url),'utf8'));
+    await db.query(await readFile(new URL('../db/003-operations.sql',import.meta.url),'utf8'));
     const password=randomBytes(24).toString('base64url');
     await db.query("INSERT INTO users(name,username,password_hash,role) VALUES('Teste','teste',$1,'admin')",[await passwordHash(password)]);
     await db.query("INSERT INTO categories(name) VALUES('Teste')");
@@ -52,12 +53,24 @@ export async function verifyPostgres(connectionString,{ssl=true}={}) {
     const dishonest=sale();dishonest.items[0].price_cents=1;
     assert.equal((await call('/orders',dishonest)).status,409);
     assert.equal(Number((await db.query('SELECT count(*) AS n FROM orders')).rows[0].n),21);
-    const closingRace=await Promise.all([call('/cash/'+shift.id+'/close',{counted_cents:10000}),call('/orders',sale())]);
+    await db.query("INSERT INTO products(category_id,name,price_cents) VALUES(1,'Bebida de teste',600)");
+    const combo=(await call('/products',{name:'Combo de teste',category_id:1,price_cents:2000,active:true,is_combo:true,components:[{product_id:1,quantity:1},{product_id:2,quantity:2}]}));assert.equal(combo.status,201);
+    const heldId=randomUUID(),heldPayload={items:[{product_id:combo.id,quantity:1,price_cents:2000}],notes:'Pedido de teste',discount_cents:0};
+    assert.equal((await call('/held',{id:heldId,label:'Concorrência',payload:heldPayload})).status,200);
+    const resume=()=>({request_key:randomUUID(),suspended_id:heldId,payment:'mixed',received_cents:3000,expected_total_cents:2000,payment_parts:[{payment:'cash',amount_cents:1000,received_cents:2000},{payment:'pix',amount_cents:1000}],items:[{product_id:combo.id,quantity:1,price_cents:2000,combo_version:combo.combo_version}]});
+    const resumed=await Promise.all(Array.from({length:8},()=>call('/orders',resume())));assert.equal(resumed.filter(r=>r.status===201).length,1);assert.equal(resumed.filter(r=>r.status===409).length,7);
+    const supply={request_key:randomUUID(),cash_session_id:shift.id,kind:'in',amount_cents:5000,reason:'Troco de teste'};
+    const supplies=await Promise.all(Array.from({length:8},()=>call('/cash/movements',supply)));assert.ok(supplies.every(r=>r.status===200));assert.equal(new Set(supplies.map(r=>r.movement.id)).size,1);
+    assert.equal((await call('/cash/movements',{...supply,request_key:randomUUID(),kind:'out',amount_cents:2000})).status,200);
+    const closingRace=await Promise.all([call('/cash/'+shift.id+'/close',{counted_cents:14000}),call('/orders',sale()),call('/cash/movements',{...supply,request_key:randomUUID(),kind:'out',amount_cents:300})]);
     assert.equal(closingRace[0].status,200);
     assert.ok([201,409].includes(closingRace[1].status));
+    assert.ok([200,409].includes(closingRace[2].status));
     const count=Number((await db.query('SELECT count(*) AS n FROM orders WHERE cash_session_id=$1',[shift.id])).rows[0].n);
     assert.equal(closingRace[0].cash.closing_summary.count,count);
-    return {ok:true,connections:5,distinctOrders:20,repeatedConfirmations:12,duplicateSales:0,competingStatusChanges:5,invalidPriceRejected:true,concurrentCashClosingVerified:true};
+    const net=Number((await db.query("SELECT sum(CASE WHEN kind='in' THEN amount_cents ELSE -amount_cents END) AS net FROM cash_movements WHERE cash_session_id=$1",[shift.id])).rows[0].net);
+    assert.equal(Number(closingRace[0].cash.expected_cents),11000+net);
+    return {ok:true,connections:5,distinctOrders:20,repeatedConfirmations:12,duplicateSales:0,competingStatusChanges:5,invalidPriceRejected:true,concurrentCashClosingVerified:true,concurrentHeldSaleVerified:true,mixedComboVerified:true,movementIdempotencyVerified:true,movementClosingRaceVerified:true};
   } finally {
     if(server)await new Promise(r=>server.close(r));
     await db?.end();

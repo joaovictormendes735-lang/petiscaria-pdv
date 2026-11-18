@@ -1,8 +1,8 @@
-# Petiscaria · PDV 2.0
+# Petiscaria · PDV 3.0
 
 Sistema de caixa em português, com frontend em HTML/CSS/JavaScript puro, servidor Node.js e PostgreSQL. O operador entra no Caixa e o administrador na Visão geral. Inclui fila de preparo, cadastro de produtos e categorias, relatório diário, autenticação e comandas não fiscais de 58/80 mm.
 
-**Homologação publicada:** https://petiscaria-pdv.onrender.com, com PostgreSQL Neon. Consulte ATUALIZACAO-2.0.md para as novidades, migração, controle de caixa, testes e configurações. O pacote não contém as credenciais da hospedagem nem do banco.
+**Homologação publicada:** https://petiscaria-pdv.onrender.com, com PostgreSQL Neon. Consulte ATUALIZACAO-3.0.md para as novidades, migração, controle de caixa, testes e configurações. O pacote não contém as credenciais da hospedagem nem do banco.
 
 ## Começar
 

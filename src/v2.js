@@ -1,4 +1,5 @@
 import { transaction } from './db.js';
+import { paymentTotals, componentSql, validateCombo } from './v3.js';
 const first=async(db,sql,args=[]) => (await db.query(sql,args)).rows[0];
 const int=(v,min=0,max=100000000)=>Number.isSafeInteger(v)&&v>=min&&v<=max;
 const str=(v,max)=>typeof v==='string'&&v.length<=max;
@@ -17,8 +18,10 @@ export async function pickup(db) {
   return {store_name:settings.store_name,message:settings.pickup_message,ready:ready.rows,recent:recent.rows,updated_at:new Date().toISOString()};
 }
 export async function cashSummary(db,id) {
-  const rows=(await db.query('SELECT payment,count(*)::integer AS count,COALESCE(sum(total_cents),0)::bigint AS total_cents FROM orders WHERE cash_session_id=$1 AND cancelled_at IS NULL GROUP BY payment',[id])).rows;
-  return {count:rows.reduce((s,r)=>s+r.count,0),total_cents:rows.reduce((s,r)=>s+Number(r.total_cents),0),payments:rows};
+  const rows=await paymentTotals(db,'o.cash_session_id=$1',[id]);
+  const totals=await first(db,'SELECT count(*)::integer AS count,COALESCE(sum(total_cents),0)::bigint AS total_cents FROM orders WHERE cash_session_id=$1 AND cancelled_at IS NULL',[id]);
+  const moves=await first(db,"SELECT COALESCE(sum(amount_cents) FILTER(WHERE kind='in'),0)::bigint AS in_cents,COALESCE(sum(amount_cents) FILTER(WHERE kind='out'),0)::bigint AS out_cents FROM cash_movements WHERE cash_session_id=$1",[id]);
+  return {count:totals.count,total_cents:Number(totals.total_cents),payments:rows,movements:{in_cents:Number(moves.in_cents),out_cents:Number(moves.out_cents)}};
 }
 const cashSql='SELECT c.*,u.name AS opened_by_name,z.name AS closed_by_name FROM cash_sessions c JOIN users u ON u.id=c.opened_by LEFT JOIN users z ON z.id=c.closed_by';
 export async function v2Routes(ctx) {
@@ -27,6 +30,7 @@ export async function v2Routes(ctx) {
     admin();const d=await body(req),old=await first(db,'SELECT * FROM settings WHERE id=1');
     const s={...old,...d};
     if(!str(s.store_name,80)||!s.store_name.trim()||![58,80].includes(s.paper_width)||typeof s.auto_print!=='boolean'||!str(s.timezone,80)||!/^#[0-9a-f]{6}$/i.test(s.primary_color)||!str(s.receipt_message,200)||!str(s.business_info,300)||!str(s.pickup_message,160)||typeof s.require_open_cash!=='boolean')fail(400,'Configurações inválidas.');
+    if(!int(s.attention_minutes,1,180)||!int(s.late_minutes,s.attention_minutes+1,480))fail(400,'Configure atenção de 1 a 180 minutos e atraso maior que atenção, até 480 minutos.');
     try{new Intl.DateTimeFormat('pt-BR',{timeZone:s.timezone});}catch{fail(400,'Fuso horário inválido.');}
     if(typeof s.logo_data_url!=='string'||s.logo_data_url.length>45000)fail(400,'A logomarca deve ter no máximo 32 KB.');
     if(s.logo_data_url){
@@ -38,17 +42,22 @@ export async function v2Routes(ctx) {
     }
     const result=await transaction(db,async c=>{
       const row=await first(c,'UPDATE settings SET store_name=$1,paper_width=$2,auto_print=$3,timezone=$4,primary_color=$5,logo_data_url=$6,receipt_message=$7,business_info=$8,pickup_message=$9,require_open_cash=$10 WHERE id=1 RETURNING *',[s.store_name.trim(),s.paper_width,s.auto_print,s.timezone,s.primary_color,s.logo_data_url,s.receipt_message,s.business_info,s.pickup_message,s.require_open_cash]);
+      await c.query('UPDATE settings SET attention_minutes=$1,late_minutes=$2 WHERE id=1',[s.attention_minutes,s.late_minutes]);Object.assign(row,{attention_minutes:s.attention_minutes,late_minutes:s.late_minutes});
       await audit(c,'settings.update',1);return row;
     });send(200,result);return true;
   }
   if((path==='/api/products'&&method==='POST')||(/^\/api\/products\/\d+$/.test(path)&&method==='PATCH')) {
     admin();const d=await body(req),id=path.split('/').at(-1);
-    const old=method==='PATCH'?await first(db,'SELECT * FROM products WHERE id=$1 AND deleted_at IS NULL',[id]):{display_order:0,available:true};
+    const old=method==='PATCH'?await first(db,'SELECT * FROM products WHERE id=$1 AND deleted_at IS NULL',[id]):{display_order:0,available:true,is_combo:false};
     if(!old)fail(404,'Produto não encontrado.');const p={...old,...d};
-    if(!str(p.name,100)||!p.name.trim()||!int(p.price_cents,1,10000000)||!int(p.category_id,1,2147483647)||typeof p.active!=='boolean'||typeof p.available!=='boolean'||!int(p.display_order,0,100000))fail(400,'Dados do produto inválidos.');
+    if(!str(p.name,100)||!p.name.trim()||!int(p.price_cents,1,10000000)||!int(p.category_id,1,2147483647)||typeof p.active!=='boolean'||typeof p.available!=='boolean'||!int(p.display_order,0,100000)||typeof p.is_combo!=='boolean')fail(400,'Dados do produto inválidos.');
     const row=await transaction(db,async c=>{
       const values=[p.name.trim(),p.category_id,p.price_cents,p.active,p.available,p.display_order];
       const r=method==='POST'?await first(c,'INSERT INTO products(name,category_id,price_cents,active,available,display_order) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',values):await first(c,'UPDATE products SET name=$1,category_id=$2,price_cents=$3,active=$4,available=$5,display_order=$6 WHERE id=$7 RETURNING *',[...values,id]);
+      const components=await validateCombo(c,r.id,p.is_combo,d.components??(await c.query(componentSql,[r.id])).rows,fail);
+      await c.query('DELETE FROM combo_items WHERE product_id=$1',[r.id]);
+      for(const item of components)await c.query('INSERT INTO combo_items(product_id,child_product_id,quantity) VALUES($1,$2,$3)',[r.id,item.product_id,item.quantity]);
+      const updated=await first(c,'UPDATE products SET is_combo=$1,combo_version=combo_version+1 WHERE id=$2 RETURNING is_combo,combo_version',[p.is_combo,r.id]);Object.assign(r,updated,{components});
       await audit(c,method==='POST'?'product.create':'product.update',r.id);return r;
     });send(method==='POST'?201:200,row);return true;
   }
@@ -59,7 +68,7 @@ export async function v2Routes(ctx) {
   }
   if(path==='/api/cash'&&method==='GET') {
     const current=await first(db,`${cashSql} WHERE c.closed_at IS NULL`)||null;
-    if(current){current.summary=await cashSummary(db,current.id);current.expected_cents=Number(current.opening_cents)+Number(current.summary.payments.find(p=>p.payment==='cash')?.total_cents||0);}
+    if(current){current.summary=await cashSummary(db,current.id);current.expected_cents=Number(current.opening_cents)+Number(current.summary.payments.find(p=>p.payment==='cash')?.total_cents||0)+current.summary.movements.in_cents-current.summary.movements.out_cents;}
     const before=url.searchParams.get('before');if(before&&!/^\d{1,18}$/.test(before))fail(400,'Página inválida.');
     const args=[],where=['c.closed_at IS NOT NULL'];
     if(session.role!=='admin'){args.push(session.id);where.push(`(c.opened_by=$${args.length} OR c.closed_by=$${args.length})`);}
@@ -83,7 +92,7 @@ export async function v2Routes(ctx) {
       const row=await first(c,'SELECT * FROM cash_sessions WHERE id=$1 FOR UPDATE',[id]);if(!row)fail(404,'Caixa não encontrado.');
       if(session.role!=='admin'&&row.opened_by!==session.id)fail(403,'Somente quem abriu o caixa ou o administrador pode fechar.');
       if(row.closed_at){if(row.counted_cents!==d.counted_cents)fail(409,'Caixa já fechado com outro valor.');return row;}
-      const summary=await cashSummary(c,id),expected=Number(row.opening_cents)+Number(summary.payments.find(p=>p.payment==='cash')?.total_cents||0);
+      const summary=await cashSummary(c,id),expected=Number(row.opening_cents)+Number(summary.payments.find(p=>p.payment==='cash')?.total_cents||0)+summary.movements.in_cents-summary.movements.out_cents;
       const result=await first(c,'UPDATE cash_sessions SET closed_at=now(),closed_by=$1,expected_cents=$2,counted_cents=$3,difference_cents=$4,closing_summary=$5 WHERE id=$6 RETURNING *',[session.id,expected,d.counted_cents,d.counted_cents-expected,JSON.stringify(summary),id]);await audit(c,'cash.close',id);return result;
     });send(200,{cash});return true;
   }

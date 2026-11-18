@@ -1,7 +1,7 @@
 import { database } from './db.js';
 import { createApp } from './app.js';
 const db=database();
-if(!(await db.query('SELECT version FROM schema_migrations WHERE version=2')).rows.length)throw Error('Execute npm run db:migrate antes de iniciar a versão 2.0.');
+if(!(await db.query('SELECT version FROM schema_migrations WHERE version=3')).rows.length)throw Error('Execute npm run db:migrate antes de iniciar a versão 3.0.');
 const server=createApp(db);
 server.requestTimeout=20000;
 server.headersTimeout=10000;
