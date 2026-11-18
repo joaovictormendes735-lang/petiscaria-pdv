@@ -1,5 +1,7 @@
 # Verificação da entrega
 
+Resultados da versão **2.0**: 23 testes de integração, 17 verificações de navegador e homologação concorrente no PostgreSQL Neon. Consulte `ATUALIZACAO-2.0.md` para a lista atual e a verificação de preservação dos dados. Os resultados abaixo documentam a entrega 1.0.
+
 Executada em 18/11/2026, com Node.js 24 e navegador Microsoft Edge/Chromium no Windows.
 
 ## Integração

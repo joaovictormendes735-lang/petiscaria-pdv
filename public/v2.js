@@ -1,0 +1,130 @@
+'use strict';
+function applyTheme(){
+  const link=$('#theme-style');if(link)link.href='/theme.css?v='+encodeURIComponent(state.settings.primary_color||'#16A34A');
+}
+function mountCartV2(){
+  if(!state.cart.length)return;
+  const footer=$('.cart-footer');
+  footer.insertAdjacentHTML('afterbegin',`<div class="cart-breakdown"><span>Subtotal</span><strong>${money(subtotal())}</strong></div>${state.user.role==='admin'?`<label class="field compact"><span>Desconto autorizado (R$)</span><input id="cart-discount" inputmode="decimal" value="${(state.discount/100).toFixed(2).replace('.',',')}" ${state.pending?'disabled':''}></label>`:''}<label class="field compact"><span>Observações do pedido</span><textarea id="cart-notes" maxlength="500" rows="2" placeholder="Ex.: sem cebola, retirar no balcão" ${state.pending?'disabled':''}>${esc(state.notes)}</textarea></label>`);
+  $('#cart-notes').addEventListener('input',e=>{state.notes=e.target.value;persist();});
+  $('#cart-discount')?.addEventListener('change',e=>{const value=parseMoney(e.target.value);if(value===null||value>=subtotal()){toast('O desconto deve ser menor que o subtotal.');e.target.value=(state.discount/100).toFixed(2).replace('.',',');return;}state.discount=value;persist();$('.cart-total strong').textContent=money(total());$('#mobile-total').textContent=money(total());});
+  $('.cart-footer small').insertAdjacentHTML('beforeend','<br>F2 buscar · F4 finalizar');
+}
+function mountCheckoutV2(){
+  const items=state.pending?.items||state.cart;
+  $('.payment-total',modal).insertAdjacentHTML('beforebegin',`<div class="checkout-items">${items.map(i=>`<div><span>${i.quantity}× ${esc(i.name||state.cart.find(p=>p.product_id===i.product_id)?.name||'Produto')}</span><strong>${money(i.quantity*i.price_cents)}</strong></div>`).join('')}${(state.pending?.discount_cents||state.discount)?`<div><span>Desconto</span><strong>− ${money(state.pending?.discount_cents||state.discount)}</strong></div>`:''}</div>`);
+  $('.check',modal).insertAdjacentHTML('beforebegin',`<label class="field"><span>Observações do pedido</span><textarea id="checkout-notes" maxlength="500" rows="2" ${state.pending?'disabled':''}>${esc(state.pending?.notes??state.notes)}</textarea></label>`);
+  $('#checkout-notes').addEventListener('input',e=>{state.notes=e.target.value;persist();if($('#cart-notes'))$('#cart-notes').value=state.notes;});
+  if(!state.pending){$('#confirm-sale').textContent='Confirmar e imprimir';if(!state.settings.auto_print)modal.insertAdjacentHTML('beforeend','<button id="save-without-print" class="quiet full-width" data-v2="save-only" disabled>Confirmar sem imprimir</button>');}
+}
+function receiptMarkup(order){
+  return `${state.settings.logo_data_url?`<img class="receipt-logo" src="${esc(state.settings.logo_data_url)}" alt="">`:''}<h1>${esc(state.settings.store_name)}</h1>${state.settings.business_info?`<p class="receipt-meta">${esc(state.settings.business_info)}</p>`:''}<div class="receipt-meta">COMPROVANTE NÃO FISCAL<br>${esc(dateTime(order.created_at))}</div><div class="ticket-number"><small>PEDIDO Nº</small>${number(order.number)}</div>${order.cancelled_at?`<p class="receipt-total">CANCELADO<br>${esc(order.cancel_reason)}</p>`:''}<table><tbody>${order.items.map(i=>`<tr><td>${i.quantity}x ${esc(i.name)}</td><td>${money(i.quantity*i.price_cents)}</td></tr>`).join('')}</tbody></table>${order.notes?`<p class="receipt-notes"><strong>OBSERVAÇÕES</strong><br>${esc(order.notes)}</p>`:''}${order.discount_cents?`<p>SUBTOTAL: ${money(order.subtotal_cents??(order.total_cents+order.discount_cents))}<br>DESCONTO: ${money(order.discount_cents)}</p>`:''}<p class="receipt-total">TOTAL: ${money(order.total_cents)}</p><p>PAGAMENTO: ${paymentLabels[order.payment].toUpperCase()}</p>${order.payment==='cash'?`<p>RECEBIDO: ${money(order.received_cents)}<br>TROCO: ${money(order.received_cents-order.total_cents)}</p>`:''}<p class="receipt-footer">${esc(state.settings.receipt_message||'AGUARDE CHAMAR SEU NÚMERO')}</p>`;
+}
+function previewReceipt(order){
+  showDialog(`${modalHeading('Pré-visualizar comanda')}<div class="receipt-preview paper${state.settings.paper_width}">${receiptMarkup(order)}</div><div class="dialog-actions"><button data-action="close-modal">Fechar</button><button class="primary" data-print="${order.id}">${icon('print')} Imprimir comanda</button></div>`);
+}
+function elapsed(order){return Math.max(0,Math.floor((Date.now()-new Date(order.created_at))/60000));}
+function enhanceOrdersV2(){
+  const grid=$('.orders-grid'),cards=[...grid.querySelectorAll('.order-card')];
+  cards.forEach((card,i)=>{const o=state.orders[i],minutes=elapsed(o);$('.order-lines',card).insertAdjacentHTML('afterbegin',`${o.notes?`<p class="order-note">${esc(o.notes)}</p>`:''}`);$('.order-time',card).insertAdjacentHTML('beforeend',`<div class="elapsed ${minutes>=15&&o.status!=='delivered'?'late':''}">${minutes} min desde o pedido</div>`);if(minutes>=15&&o.status!=='delivered')card.classList.add('waiting-long');$('footer',card).insertAdjacentHTML('beforeend',`<button class="quiet" data-detail="${o.id}" aria-label="Detalhes do pedido ${number(o.number)}">${icon('search')}</button>`);});
+  if(state.filter==='all'||state.filter==='queue'){
+    grid.classList.add('board');const columns=states.map(s=>{const column=document.createElement('section');column.className='board-column';column.innerHTML=`<h2>${labels[s]} <span class="count-label">${state.orders.filter(o=>o.status===s).length}</span></h2>`;grid.append(column);return column;});
+    cards.forEach((card,i)=>columns[states.indexOf(state.orders[i].status)].append(card));
+  }
+}
+function mountProductV2(p,id){
+  const form=$('#product-form');$('.check span',form).textContent='Produto ativo';
+  $('.check',form).insertAdjacentHTML('afterend',`<label class="check"><input type="checkbox" name="available" ${p.available!==false?'checked':''}><span>Disponível no momento</span></label><label class="field"><span>Ordem de exibição</span><input type="number" name="display_order" min="0" max="100000" value="${p.display_order||0}" required><small>Menores números aparecem primeiro.</small></label>${id?`<button type="button" class="danger" data-archive="${id}">Excluir do cadastro</button>`:''}`);
+}
+function mountSettingsV2(){
+  const s=state.settings;state.logoDraft=s.logo_data_url||'';
+  $('#settings-error').insertAdjacentHTML('beforebegin',`<label class="field"><span>Cor principal</span><input type="color" name="primary_color" value="${esc(s.primary_color||'#16A34A')}"><small>A cor do texto é ajustada automaticamente para manter o contraste.</small></label><label class="field"><span>Logomarca (PNG, JPEG ou WebP)</span><input id="logo-file" type="file" accept="image/png,image/jpeg,image/webp"><small>Até 32 KB. Use uma imagem pequena, preferencialmente quadrada.</small></label>${s.logo_data_url?`<img class="logo-preview" src="${esc(s.logo_data_url)}" alt="Logomarca atual">`:''}<button type="button" class="quiet danger" data-v2="remove-logo">Remover logomarca</button><label class="field"><span>Dados do estabelecimento</span><textarea name="business_info" maxlength="300" rows="2" placeholder="Endereço, telefone ou identificação">${esc(s.business_info||'')}</textarea></label><label class="field"><span>Mensagem da comanda</span><input name="receipt_message" maxlength="200" value="${esc(s.receipt_message||'AGUARDE CHAMAR SEU NÚMERO')}"></label><label class="field"><span>Mensagem do painel de retirada</span><input name="pickup_message" maxlength="160" value="${esc(s.pickup_message||'RETIRE SEU PEDIDO NO BALCÃO')}"></label><label class="check"><input type="checkbox" name="require_open_cash" ${s.require_open_cash?'checked':''}><span>Exigir abertura de caixa para registrar vendas</span></label>`);
+  $('#logo-file').addEventListener('change',e=>{const file=e.target.files[0];if(!file)return;if(file.size>32768||!['image/png','image/jpeg','image/webp'].includes(file.type)){toast('Use PNG, JPEG ou WebP com até 32 KB.');e.target.value='';return;}const reader=new FileReader();reader.onload=()=>{state.logoDraft=reader.result;toast('Logomarca preparada. Salve as configurações para aplicar.');};reader.readAsDataURL(file);});
+}
+function settingsV2Payload(f){return {primary_color:f.get('primary_color'),logo_data_url:state.logoDraft||'',business_info:f.get('business_info'),receipt_message:f.get('receipt_message'),pickup_message:f.get('pickup_message'),require_open_cash:f.has('require_open_cash')};}
+function orderStatus(o){return o.cancelled_at?'<span class="status cancelled">Cancelado</span>':`<span class="status ${o.status}">${labels[o.status]}</span>`;}
+function enhanceHistoryRows(){
+  $$reportRows().forEach(row=>{const print=$('[data-print]',row);if(!print)return;const o=reportOrders.find(o=>String(o.id)===print.dataset.print);if(o?.cancelled_at)$('.status',row).outerHTML=orderStatus(o);print.parentElement.insertAdjacentHTML('beforeend',`<button class="quiet secondary" data-detail="${print.dataset.print}">Detalhes</button>`);});
+}
+function $$reportRows(){return [...document.querySelectorAll('#content tbody tr')];}
+async function detailOrder(id){
+  const {order:o}=await api('/orders/'+id);
+  showDialog(`${modalHeading('Pedido #'+number(o.number))}<p class="small muted">${dateTime(o.created_at)} · ${esc(o.operator_name)}</p>${orderStatus(o)}<div class="checkout-items">${o.items.map(i=>`<div><span>${i.quantity}× ${esc(i.name)}</span><strong>${money(i.quantity*i.price_cents)}</strong></div>`).join('')}</div>${o.notes?`<p class="order-note">${esc(o.notes)}</p>`:''}<p>Subtotal: ${money(o.subtotal_cents??(o.total_cents+o.discount_cents))}<br>Desconto: ${money(o.discount_cents||0)}<br><strong>Total: ${money(o.total_cents)}</strong><br>${paymentLabels[o.payment]}${o.payment==='cash'?` · Troco ${money(o.received_cents-o.total_cents)}`:''}</p>${o.cancelled_at?`<p class="error">Cancelado em ${dateTime(o.cancelled_at)}<br>${esc(o.cancel_reason)}</p>`:''}<div class="dialog-actions"><button class="secondary" data-preview="${o.id}">Pré-visualizar</button><button class="primary" data-print="${o.id}">Reimprimir</button></div>${state.user.role==='admin'&&!o.cancelled_at?`<button class="quiet danger full-width" data-cancel="${o.id}">Cancelar venda</button>`:''}`);
+}
+let historyDate='',historyNumber='',historyNext=null,historyRows=[];
+let cashData=null,cashNext=null,cashClosed=[];
+async function renderV2View(){
+  const view=state.view;$('#content').innerHTML=heading(view==='dashboard'?'Visão geral':view==='cash'?'Controle de caixa':'Histórico de vendas','Carregando informações…');
+  if(view==='dashboard')await renderDashboard();else if(view==='cash')await renderCash();else await renderHistory();
+}
+function paymentStats(payments){return `<div class="stats">${Object.entries(paymentLabels).map(([key,label])=>`<div class="stat"><small>${label}</small><strong>${money(payments.find(p=>p.payment===key)?.total_cents||0)}</strong></div>`).join('')}</div>`;}
+async function renderDashboard(){
+  const d=await api('/reports?date='+today());if(state.view!=='dashboard')return;const sum=Number(d.totals.total_cents),max=Math.max(1,...d.top_products.map(p=>Number(p.quantity)));
+  $('#content').innerHTML=`${heading('Visão geral','O movimento da sua petiscaria, em um só lugar.','<button class="secondary" data-v2="refresh-dashboard">'+icon('refresh')+' Atualizar</button>')}<div class="stats overview"><div class="stat highlight"><small>Faturamento de hoje</small><strong>${money(sum)}</strong><p class="small muted">Vendas confirmadas, sem cancelamentos</p></div><div class="stat"><small>Pedidos</small><strong>${d.totals.count}</strong></div><div class="stat"><small>Ticket médio</small><strong>${money(d.totals.count?Math.round(sum/d.totals.count):0)}</strong></div><div class="stat"><small>Atendimento</small><button class="primary" data-view="cashier">Abrir o caixa</button></div></div>${paymentStats(d.payments)}<div class="dashboard-columns"><section class="panel"><h2>Produtos mais vendidos</h2><p class="subtitle">Quantidade de unidades no dia</p>${d.top_products.length?d.top_products.map(p=>`<div class="ranking-row"><div><strong>${esc(p.name)}</strong><span>${p.quantity} un.</span></div><progress max="${max}" value="${p.quantity}" aria-label="${esc(p.name)}: ${p.quantity} unidades"></progress></div>`).join(''):'<div class="empty-state">As primeiras vendas do dia aparecerão aqui.</div>'}</section><section class="panel quick-links"><h2>Sua operação</h2><p class="info">Acompanhe a cozinha, confira o caixa e organize a retirada.</p><button data-view="orders">${icon('orders')} Gerenciar pedidos</button><button data-view="cash">${icon('cash')} Abertura e fechamento</button><a class="button secondary" href="/retirada" target="_blank" rel="noopener">${icon('check')} Abrir painel de retirada</a></section></div>`;
+}
+async function renderHistory(append=false){
+  const q=new URLSearchParams();if(historyDate)q.set('date',historyDate);if(historyNumber)q.set('number',historyNumber);if(append&&historyNext)q.set('before',historyNext);
+  const d=await api('/history?'+q);if(state.view!=='history')return;historyRows=append?[...historyRows,...d.orders]:d.orders;historyNext=d.next;
+  $('#content').innerHTML=`${heading('Histórico de vendas',state.user.role==='admin'?'Vendas e cancelamentos, com os registros preservados.':'Consulte as vendas registradas pela sua conta.')}<form class="toolbar" id="history-filter"><label class="field compact"><span>Número do pedido</span><input name="number" inputmode="numeric" pattern="[0-9]*" value="${esc(historyNumber)}" placeholder="Ex.: 42"></label><label class="field compact"><span>Data</span><input name="date" type="date" value="${historyDate}"></label><button class="primary" type="submit">Filtrar</button><button type="button" class="quiet" data-v2="clear-history">Limpar filtros</button></form><div class="panel table-wrap"><table><thead><tr><th>Pedido</th><th>Data e horário</th><th>Total</th><th>Pagamento</th><th>Status</th><th>Operador</th><th></th></tr></thead><tbody>${historyRows.map(o=>`<tr><td><strong>#${number(o.number)}</strong></td><td>${dateTime(o.created_at)}</td><td>${money(o.total_cents)}</td><td>${paymentLabels[o.payment]}</td><td>${orderStatus(o)}</td><td>${esc(o.operator_name)}</td><td><button class="quiet secondary" data-detail="${o.id}">Detalhes</button><button class="quiet" data-preview="${o.id}" aria-label="Pré-visualizar pedido ${number(o.number)}">${icon('print')}</button></td></tr>`).join('')||'<tr><td colspan="7">Nenhuma venda encontrada.</td></tr>'}</tbody></table></div>${historyNext?'<button class="load-more" data-v2="more-history">Carregar mais vendas</button>':''}`;
+  $('#history-filter').addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.target);historyDate=f.get('date');historyNumber=f.get('number').trim();safe(()=>renderHistory());});
+}
+async function renderCash(append=false){
+  const d=await api('/cash'+(append&&cashNext?'?before='+cashNext:''));if(state.view!=='cash')return;cashClosed=append?[...cashClosed,...d.closed]:d.closed;cashNext=d.next;cashData=d;const c=d.current;
+  $('#content').innerHTML=`${heading('Controle de caixa','Abra o expediente, acompanhe os recebimentos e confira o fechamento.','<button class="secondary" data-v2="refresh-cash">'+icon('refresh')+' Atualizar</button>')}${c?`<div class="cash-banner"><div><span class="status ready">Caixa aberto</span><p class="small">Aberto por <strong>${esc(c.opened_by_name)}</strong> em ${dateTime(c.opened_at)}</p></div><button class="primary" data-v2="close-cash">Fechar caixa</button></div><div class="stats"><div class="stat"><small>Dinheiro inicial</small><strong>${money(c.opening_cents)}</strong></div><div class="stat highlight"><small>Vendas do expediente</small><strong>${money(c.summary.total_cents)}</strong></div><div class="stat"><small>Pedidos</small><strong>${c.summary.count}</strong></div><div class="stat"><small>Dinheiro esperado</small><strong>${money(c.expected_cents)}</strong></div></div>${paymentStats(c.summary.payments)}`:`<div class="panel cash-banner"><div><h2>Nenhum caixa aberto</h2><p class="info">Informe o dinheiro inicial para começar o controle deste expediente.</p></div><button class="primary" data-v2="open-cash">Abrir caixa</button></div>${!state.settings.require_open_cash?'<p class="info">A abertura obrigatória está desativada. Vendas sem caixa aberto ficam no histórico e no relatório diário.</p>':''}`}<section class="panel table-wrap"><h2>Fechamentos anteriores</h2><table><thead><tr><th>Caixa</th><th>Abertura</th><th>Fechamento</th><th>Responsáveis</th><th>Esperado</th><th>Contado</th><th>Diferença</th><th></th></tr></thead><tbody>${cashClosed.map(row=>`<tr><td>#${row.id}</td><td>${dateTime(row.opened_at)}</td><td>${dateTime(row.closed_at)}</td><td>${esc(row.opened_by_name)} / ${esc(row.closed_by_name)}</td><td>${money(row.expected_cents)}</td><td>${money(row.counted_cents)}</td><td>${money(row.difference_cents)}</td><td><button class="quiet secondary" data-close-print="${row.id}">Imprimir resumo</button></td></tr>`).join('')||'<tr><td colspan="8">Nenhum fechamento registrado.</td></tr>'}</tbody></table></section>${cashNext?'<button class="load-more" data-v2="more-cash">Carregar mais fechamentos</button>':''}`;
+}
+function openCashDialog(){
+  const requestKey=crypto.randomUUID();
+  showDialog(`${modalHeading('Abrir caixa')}<form id="cash-open-form"><p class="info">O expediente é compartilhado entre os dispositivos da loja. Só pode existir um caixa aberto por vez.</p><label class="field"><span>Dinheiro inicial (R$)</span><input name="opening" inputmode="decimal" value="0,00" required></label><p class="error" id="cash-error"></p><div class="dialog-actions"><button type="button" data-action="close-modal">Voltar</button><button class="primary" type="submit">Confirmar abertura</button></div></form>`);
+  $('#cash-open-form').addEventListener('submit',async e=>{e.preventDefault();const value=parseMoney(new FormData(e.target).get('opening')),button=$('[type=submit]',e.target);if(value===null){$('#cash-error').textContent='Informe um valor válido.';return;}button.disabled=true;try{await post('/cash/open',{opening_cents:value,request_key:requestKey});modal.close();await renderCash();toast('Caixa aberto.');}catch(error){if($('#cash-error'))$('#cash-error').textContent=error.message;button.disabled=false;}});
+}
+function closeCashDialog(){
+  const c=cashData.current;
+  showDialog(`${modalHeading('Fechar caixa #'+c.id)}<form id="cash-close-form"><p class="info">Confira as vendas e conte o dinheiro físico. Valores em Pix e cartões são apresentados separadamente.</p><div class="change"><span>Dinheiro esperado</span><strong>${money(c.expected_cents)}</strong></div><label class="field"><span>Dinheiro contado (R$)</span><input name="counted" inputmode="decimal" required></label><div class="change"><span>Diferença</span><strong id="cash-difference">—</strong></div><label class="check"><input type="checkbox" required><span>Conferi os valores e confirmo o encerramento deste expediente.</span></label><p class="error" id="cash-error"></p><div class="dialog-actions"><button type="button" data-action="close-modal">Voltar</button><button class="primary" type="submit">Confirmar fechamento</button></div></form>`);
+  $('[name=counted]').addEventListener('input',e=>{const n=parseMoney(e.target.value);$('#cash-difference').textContent=n===null?'—':money(n-c.expected_cents);});
+  $('#cash-close-form').addEventListener('submit',async e=>{e.preventDefault();const value=parseMoney(new FormData(e.target).get('counted')),button=$('[type=submit]',e.target);if(value===null){$('#cash-error').textContent='Informe um valor válido.';return;}button.disabled=true;try{await post('/cash/'+c.id+'/close',{counted_cents:value});modal.close();await renderCash();toast('Caixa encerrado. O resumo está disponível para impressão.');}catch(error){if($('#cash-error'))$('#cash-error').textContent=error.message;button.disabled=false;}});
+}
+function printCash(c){
+  const summary=c.closing_summary;
+  $('#receipt').className='paper'+state.settings.paper_width;
+  $('#receipt').innerHTML=`<h1>${esc(state.settings.store_name)}</h1><p class="receipt-total">FECHAMENTO DE CAIXA #${c.id}</p><p>Abertura: ${dateTime(c.opened_at)}<br>Por: ${esc(c.opened_by_name)}<br>Fechamento: ${dateTime(c.closed_at)}<br>Por: ${esc(c.closed_by_name)}</p><p>INICIAL: ${money(c.opening_cents)}<br>VENDAS: ${money(summary.total_cents)}<br>PEDIDOS: ${summary.count}</p>${Object.entries(paymentLabels).map(([key,label])=>`<p>${label.toUpperCase()}: ${money(summary.payments.find(p=>p.payment===key)?.total_cents||0)}</p>`).join('')}<p class="receipt-total">DINHEIRO ESPERADO: ${money(c.expected_cents)}<br>CONTADO: ${money(c.counted_cents)}<br>DIFERENÇA: ${money(c.difference_cents)}</p>`;window.print();
+}
+function cancelDialog(id){
+  showDialog(`${modalHeading('Cancelar venda')}<form id="cancel-sale-form"><p class="info">O pedido será marcado como cancelado e sairá da fila e dos totais de vendas. O registro será preservado para auditoria. Esta ação não efetua estorno bancário.</p><label class="field"><span>Motivo do cancelamento</span><textarea name="reason" minlength="3" maxlength="300" rows="3" required></textarea></label><p class="error" id="cancel-error"></p><div class="dialog-actions"><button type="button" data-action="close-modal">Voltar</button><button type="submit" class="danger">Confirmar cancelamento</button></div></form>`);
+  $('#cancel-sale-form').addEventListener('submit',async e=>{e.preventDefault();const button=$('[type=submit]',e.target);button.disabled=true;try{await post('/orders/'+id+'/cancel',{reason:new FormData(e.target).get('reason')});modal.close();await renderView();toast('Venda cancelada e registro preservado.');}catch(error){if($('#cancel-error'))$('#cancel-error').textContent=error.message;button.disabled=false;}});
+}
+let pickupTimer=null,pickupRunning=false;
+async function startPickup(){
+  document.body.classList.add('pickup-mode');
+  if(document.hidden||pickupRunning)return;pickupRunning=true;clearTimeout(pickupTimer);
+  try{const d=await api('/pickup');state.settings.store_name=d.store_name;document.title=d.store_name+' · Retirada';app.innerHTML=`<main class="pickup-screen"><header><div><p class="eyebrow">PAINEL DE RETIRADA</p><h1>${esc(d.store_name)}</h1></div><span class="tag">Atualizado às ${time(d.updated_at)}</span></header><section><h2>Seu pedido está pronto</h2><div class="pickup-ready">${d.ready.length?d.ready.map(o=>`<div class="pickup-ticket">${number(o.number)}</div>`).join(''):'<p class="pickup-empty">Aguarde. As senhas prontas aparecerão aqui.</p>'}</div></section><footer><h2>${esc(d.message)}</h2><p>Últimas senhas chamadas</p><div class="pickup-recent">${d.recent.map(o=>`<span>${number(o.number)}</span>`).join('')||'—'}</div></footer></main>`;}
+  catch(error){if(!$('.pickup-screen'))app.innerHTML='<main class="pickup-screen"><h1>Painel de retirada</h1><p>Aguardando conexão com o servidor…</p></main>';toast('Sem atualização. Tentaremos novamente em 15 segundos.');}
+  finally{pickupRunning=false;if(!document.hidden)pickupTimer=setTimeout(startPickup,15000);}
+}
+document.addEventListener('visibilitychange',()=>{if(location.pathname.startsWith('/retirada')){clearTimeout(pickupTimer);if(!document.hidden)startPickup();}});
+document.addEventListener('keydown',e=>{if(e.ctrlKey||e.altKey||e.metaKey||e.shiftKey||!state.user||state.busy)return;if(e.key==='F2'){e.preventDefault();if(modal.open)return;if(state.view!=='cashier'){state.view='cashier';shell();}$('#product-search')?.focus();}else if(e.key==='F4'){e.preventDefault();if(!modal.open&&state.cart.length)checkout();}});
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('button');if(!b||b.disabled)return;
+  await safe(async()=>{
+    if(b.dataset.detail){await detailOrder(b.dataset.detail);return;}
+    if(b.dataset.preview){const {order}=await api('/orders/'+b.dataset.preview);previewReceipt(order);return;}
+    if(b.dataset.cancel){cancelDialog(b.dataset.cancel);return;}
+    if(b.dataset.archive){const id=b.dataset.archive;showDialog(`${modalHeading('Excluir produto?')}<p class="info">O produto sairá do cadastro e do caixa. As vendas anteriores continuarão preservadas.</p><div class="dialog-actions"><button data-action="close-modal">Voltar</button><button class="danger" data-confirm-archive="${id}">Confirmar exclusão</button></div>`);return;}
+    if(b.dataset.confirmArchive){b.disabled=true;try{await post('/products/'+b.dataset.confirmArchive+'/archive',{});await catalog();modal.close();renderProducts();toast('Produto excluído do cadastro.');}finally{b.disabled=false;}return;}
+    if(b.dataset.closePrint){const c=cashClosed.find(c=>String(c.id)===b.dataset.closePrint);if(c)printCash(c);return;}
+    switch(b.dataset.v2){
+      case 'save-only':await confirmSale(false);break;
+      case 'refresh-dashboard':await renderDashboard();break;
+      case 'clear-history':historyDate='';historyNumber='';await renderHistory();break;
+      case 'more-history':await renderHistory(true);break;
+      case 'refresh-cash':await renderCash();break;
+      case 'more-cash':await renderCash(true);break;
+      case 'open-cash':openCashDialog();break;
+      case 'close-cash':closeCashDialog();break;
+      case 'remove-logo':state.logoDraft='';$('.logo-preview')?.remove();$('#logo-file').value='';toast('Logomarca removida do rascunho. Salve para aplicar.');break;
+    }
+  });
+});
+(async()=>{
+  if(location.pathname.startsWith('/retirada')){await startPickup();return;}
+  try{const data=await api('/session');state.user=data.user;state.csrf=data.csrf;await catalog();restore();state.view=state.pending||state.user.role!=='admin'?'cashier':'dashboard';shell();}catch(error){login(error.status===401?'':error.message);}
+})();

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { randomBytes,randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
@@ -16,6 +17,7 @@ export async function verifyPostgres(connectionString,{ssl=true}={}) {
     await control.query(`CREATE SCHEMA ${schema}`);
     db=new pg.Pool({connectionString,ssl:ssl?{rejectUnauthorized:true}:undefined,max:5,options:`-c search_path=${schema}`});
     await db.query(await readFile(new URL('../db/001-init.sql',import.meta.url),'utf8'));
+    await db.query(await readFile(new URL('../db/002-v2.sql',import.meta.url),'utf8'));
     const password=randomBytes(24).toString('base64url');
     await db.query("INSERT INTO users(name,username,password_hash,role) VALUES('Teste','teste',$1,'admin')",[await passwordHash(password)]);
     await db.query("INSERT INTO categories(name) VALUES('Teste')");
@@ -31,6 +33,8 @@ export async function verifyPostgres(connectionString,{ssl=true}={}) {
       return {status:r.status,...body};
     };
     assert.equal((await call('/login',{username:'teste',password})).status,200);
+    await call('/settings',{require_open_cash:true},'PATCH');
+    const shift=(await call('/cash/open',{opening_cents:10000,request_key:randomUUID()})).cash;
     const sale=()=>({request_key:randomUUID(),payment:'pix',received_cents:1200,expected_total_cents:1200,items:[{product_id:1,quantity:1,price_cents:1200}]});
     const orders=await Promise.all(Array.from({length:20},()=>call('/orders',sale())));
     assert.ok(orders.every(r=>r.status===201));
@@ -48,7 +52,12 @@ export async function verifyPostgres(connectionString,{ssl=true}={}) {
     const dishonest=sale();dishonest.items[0].price_cents=1;
     assert.equal((await call('/orders',dishonest)).status,409);
     assert.equal(Number((await db.query('SELECT count(*) AS n FROM orders')).rows[0].n),21);
-    return {ok:true,connections:5,distinctOrders:20,repeatedConfirmations:12,duplicateSales:0,competingStatusChanges:5,invalidPriceRejected:true};
+    const closingRace=await Promise.all([call('/cash/'+shift.id+'/close',{counted_cents:10000}),call('/orders',sale())]);
+    assert.equal(closingRace[0].status,200);
+    assert.ok([201,409].includes(closingRace[1].status));
+    const count=Number((await db.query('SELECT count(*) AS n FROM orders WHERE cash_session_id=$1',[shift.id])).rows[0].n);
+    assert.equal(closingRace[0].cash.closing_summary.count,count);
+    return {ok:true,connections:5,distinctOrders:20,repeatedConfirmations:12,duplicateSales:0,competingStatusChanges:5,invalidPriceRejected:true,concurrentCashClosingVerified:true};
   } finally {
     if(server)await new Promise(r=>server.close(r));
     await db?.end();
@@ -58,11 +67,12 @@ export async function verifyPostgres(connectionString,{ssl=true}={}) {
 }
 
 if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href){
-  if(!process.env.TEST_DATABASE_URL){
+  const connection=process.argv.includes('--stdin')?readFileSync(0,'utf8').trim():process.env.TEST_DATABASE_URL;
+  if(!connection){
     console.error('Configure TEST_DATABASE_URL com uma conexão PostgreSQL direta para executar a homologação.');
     process.exitCode=1;
   }else{
-    verifyPostgres(process.env.TEST_DATABASE_URL,{ssl:process.env.TEST_DATABASE_SSL!=='disable'})
+    verifyPostgres(connection,{ssl:process.env.TEST_DATABASE_SSL!=='disable'})
       .then(result=>console.log(JSON.stringify(result,null,2)))
       .catch(error=>{console.error(error.message);process.exitCode=1;});
   }

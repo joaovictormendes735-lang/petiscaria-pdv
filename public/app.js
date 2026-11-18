@@ -28,7 +28,7 @@ const icon = name => `<svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><
 const labels={pending:'Pendente',preparing:'Em preparo',ready:'Pronto',delivered:'Entregue'};
 const paymentLabels={pix:'Pix',cash:'Dinheiro',debit:'Débito',credit:'Crédito'};
 const states=Object.keys(labels);
-const state={user:null,csrf:'',view:'cashier',categories:[],products:[],settings:{store_name:'Petiscaria',timezone:'America/Sao_Paulo',paper_width:80},cart:[],category:0,search:'',orders:[],next:null,filter:'queue',busy:false,pending:null};
+const state={user:null,csrf:'',view:'cashier',categories:[],products:[],settings:{store_name:'Petiscaria',timezone:'America/Sao_Paulo',paper_width:80},cart:[],notes:'',discount:0,category:0,search:'',orders:[],next:null,filter:'all',busy:false,pending:null};
 let toastTimer;
 function toast(message){ $('#toast').textContent=message; $('#toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('#toast').hidden=true,5500); }
 async function api(path,options={}){
@@ -42,34 +42,36 @@ async function api(path,options={}){
   finally{clearTimeout(timeout);}
 }
 const post=(path,data,method='POST')=>api(path,{method,body:JSON.stringify(data)});
-const total=()=>state.cart.reduce((sum,i)=>sum+i.price_cents*i.quantity,0);
+const subtotal=()=>state.cart.reduce((sum,i)=>sum+i.price_cents*i.quantity,0);
+const total=()=>Math.max(0,subtotal()-(state.discount||0));
 const count=()=>state.cart.reduce((sum,i)=>sum+i.quantity,0);
 const time=v=>new Date(v).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',timeZone:state.settings.timezone});
 const dateTime=v=>new Date(v).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short',timeZone:state.settings.timezone});
 function today(){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:state.settings.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());return ['year','month','day'].map(k=>parts.find(p=>p.type===k).value).join('-');}
 const storageKey=()=>`pdv:${state.user.id}`;
-function persist(){try{sessionStorage.setItem(storageKey(),JSON.stringify({cart:state.cart,pending:state.pending}));}catch{toast('O navegador não permitiu guardar o rascunho nesta aba. Mantenha-a aberta até confirmar a venda.');}}
-function restore(){try{const saved=JSON.parse(sessionStorage.getItem(storageKey())||'{}');if(Array.isArray(saved.cart))state.cart=saved.cart.filter(i=>Number.isInteger(i.product_id)&&Number.isInteger(i.quantity)&&i.quantity>0&&i.quantity<=99&&Number.isInteger(i.price_cents));state.pending=saved.pending||null;}catch{state.cart=[];state.pending=null;}}
-async function catalog(){const data=await api('/catalog');Object.assign(state,data);document.title=`${state.settings.store_name} · PDV`;}
+function persist(){try{sessionStorage.setItem(storageKey(),JSON.stringify({cart:state.cart,pending:state.pending,notes:state.notes,discount:state.discount}));}catch{toast('O navegador não permitiu guardar o rascunho nesta aba. Mantenha-a aberta até confirmar a venda.');}}
+function restore(){try{const saved=JSON.parse(sessionStorage.getItem(storageKey())||'{}');if(Array.isArray(saved.cart))state.cart=saved.cart.filter(i=>Number.isInteger(i.product_id)&&Number.isInteger(i.quantity)&&i.quantity>0&&i.quantity<=99&&Number.isInteger(i.price_cents));state.pending=saved.pending||null;state.notes=typeof saved.notes==='string'?saved.notes.slice(0,500):'';state.discount=state.user.role==='admin'&&Number.isSafeInteger(saved.discount)?Math.max(0,saved.discount):0;}catch{state.cart=[];state.pending=null;}}
+async function catalog(){const data=await api('/catalog');Object.assign(state,data);document.title=`${state.settings.store_name} · PDV`;applyTheme();}
 function login(message=''){
   state.user=null;state.csrf='';
   app.innerHTML=`<main class="login-page"><form class="login-card" id="login-form"><div class="brand"><img src="/favicon.svg" alt=""><div><strong>Petiscaria</strong><small>Seu caixa, mais simples</small></div></div><h1>Vamos abrir o caixa?</h1><p class="subtitle">Entre com sua conta para começar.</p><label class="field"><span>Usuário</span><input name="username" autocomplete="username" required maxlength="80" autocapitalize="none" spellcheck="false"></label><label class="field"><span>Senha</span><input name="password" type="password" autocomplete="current-password" required maxlength="128"></label><p class="error" id="login-error">${esc(message)}</p><button class="primary" type="submit">Entrar no sistema</button><p class="login-note">Acesso restrito à equipe da petiscaria.</p></form></main>`;
   $('#login-form').addEventListener('submit',async e=>{
     e.preventDefault();const button=$('button',e.target);button.disabled=true;button.textContent='Entrando…';$('#login-error').textContent='';
-    try{const data=await post('/login',Object.fromEntries(new FormData(e.target)));state.user=data.user;state.csrf=data.csrf;await catalog();restore();shell();}
+    try{const data=await post('/login',Object.fromEntries(new FormData(e.target)));state.user=data.user;state.csrf=data.csrf;await catalog();restore();state.view=state.pending||state.user.role!=='admin'?'cashier':'dashboard';shell();}
     catch(error){$('#login-error').textContent=error.message;button.disabled=false;button.textContent='Entrar no sistema';}
   });
 }
 function shell(){
   const admin=state.user.role==='admin';
-  const nav=[['cashier','Caixa','cart'],['orders','Pedidos','orders'],...(admin?[['products','Produtos','box'],['reports','Relatórios','report'],['settings','Configurações','settings']]:[])];
-  app.innerHTML=`<header class="topbar"><div class="brand"><img src="/favicon.svg" alt=""><div><strong>${esc(state.settings.store_name)}</strong><small>Ponto de venda</small></div></div><nav class="nav" aria-label="Menu principal">${nav.map(([v,label,i])=>`<button data-view="${v}" class="${state.view===v?'active':''}">${icon(i)}${label}</button>`).join('')}</nav><div class="account"><span class="avatar">${esc(state.user.name.charAt(0).toUpperCase())}</span><div class="account-name">${esc(state.user.name)}<small>${admin?'Administrador':'Operador'}</small></div><button class="quiet" data-action="logout" aria-label="Sair da conta" title="Sair">${icon('logout')}</button></div></header><main id="content"></main>`;
+  const nav=[...(admin?[['dashboard','Visão geral','report']]:[]),['cashier','Caixa','cart'],['orders','Pedidos','orders'],['cash','Controle de caixa','cash'],['history','Histórico','clock'],...(admin?[['products','Produtos','box'],['reports','Relatórios','report'],['settings','Configurações','settings']]:[]),['pickup','Retirada','check']];
+  app.innerHTML=`<header class="topbar"><div class="brand"><img src="${esc(state.settings.logo_data_url||'/favicon.svg')}" alt=""><div><strong>${esc(state.settings.store_name)}</strong><small>Ponto de venda · 2.0</small></div></div><nav class="nav" aria-label="Menu principal">${nav.map(([v,label,i])=>`<button data-view="${v}" class="${state.view===v?'active':''}">${icon(i)}${label}</button>`).join('')}</nav><div class="account"><span class="avatar">${esc(state.user.name.charAt(0).toUpperCase())}</span><div class="account-name">${esc(state.user.name)}<small>${admin?'Administrador':'Operador'}</small></div><button class="quiet" data-action="logout" aria-label="Sair da conta" title="Sair">${icon('logout')}</button></div></header><main id="content"></main>`;
   renderView();
 }
 function heading(title,subtitle,action=''){return `<div class="page-heading"><div><h1>${title}</h1><p class="subtitle">${subtitle}</p></div>${action}</div>`;}
 async function renderView(){
   const target=$('#content');if(!target)return;
   if(state.view==='cashier')renderCashier();
+  else if(['dashboard','cash','history'].includes(state.view))await safe(()=>renderV2View());
   else if(state.view==='products')renderProducts();
   else if(state.view==='settings')renderSettings();
   else {
@@ -87,12 +89,13 @@ function renderGrid(){
   $('#category-title').textContent=state.categories.find(c=>c.id===state.category)?.name||'Cardápio';$('#product-count').textContent=`${products.length} produtos`;
   $('#product-grid').innerHTML=products.length?products.map(p=>{
     const index=state.categories.findIndex(c=>c.id===p.category_id),qty=state.cart.find(i=>i.product_id===p.id)?.quantity;
-    return `<button class="product" data-product="${p.id}" data-color="${index%4}" ${state.pending?'disabled':''} aria-label="Adicionar ${esc(p.name)}, ${money(p.price_cents)}"><span class="product-illustration">${icon(['snack','fries','drink','box'][index%4]||'box')}</span>${qty?`<span class="product-count">${qty} no pedido</span>`:''}<span class="product-name">${esc(p.name)}</span><span class="product-bottom"><span class="product-price">${money(p.price_cents)}</span><span class="add" aria-hidden="true">+</span></span></button>`;
+    return `<button class="product" data-product="${p.id}" data-color="${index%4}" ${state.pending||p.available===false?'disabled':''} aria-label="Adicionar ${esc(p.name)}, ${money(p.price_cents)}"><span class="product-illustration">${icon(['snack','fries','drink','box'][index%4]||'box')}</span>${qty?`<span class="product-count">${qty} no pedido</span>`:''}<span class="product-name">${esc(p.name)}</span><span class="product-bottom"><span class="product-price">${money(p.price_cents)}</span><span class="add" aria-hidden="true">${p.available===false?'×':'+'}</span></span>${p.available===false?'<span class="small muted">Indisponível</span>':''}</button>`;
   }).join(''):'<div class="empty-state"><h2>Nenhum produto encontrado</h2><p>Experimente outro nome ou categoria.</p></div>';
 }
 function renderCart(){
   $('#cart').innerHTML=`<div class="cart-heading"><div><h2>Pedido atual</h2><span class="count-badge">${count()}</span></div>${state.cart.length&&!state.pending?'<button class="quiet danger clear-cart" data-action="clear-cart">Limpar</button>':''}</div>${state.pending?'<div class="retry-note">Há uma venda aguardando confirmação. Verifique antes de iniciar outra.</div>':''}${state.cart.length?`<div class="cart-items">${state.cart.map(i=>`<div class="cart-item"><div class="item-top"><strong>${esc(i.name)}</strong><strong>${money(i.price_cents*i.quantity)}</strong></div><div class="item-bottom"><div class="qty"><button data-qty="${i.product_id}" data-delta="-1" aria-label="Diminuir ${esc(i.name)}" ${state.pending?'disabled':''}>−</button><span>${i.quantity}</span><button data-qty="${i.product_id}" data-delta="1" aria-label="Aumentar ${esc(i.name)}" ${state.pending?'disabled':''}>+</button></div><span class="unit-price">${money(i.price_cents)} / un.</span></div></div>`).join('')}</div>`:`<div class="cart-empty"><div class="empty-illustration">${icon('cart')}</div><strong>Seu pedido começa aqui</strong><p>Selecione os produtos ao lado<br>para começar uma venda.</p></div>`}<div class="cart-footer"><div class="cart-total"><span>Total do pedido</span><strong>${money(total())}</strong></div><button class="primary" data-action="checkout" ${!state.cart.length?'disabled':''}>${icon('check')}${state.pending?'Verificar venda':'Finalizar venda'}</button><small>${state.pending?'O pedido está preservado nesta aba.':'Confirme o pagamento na próxima etapa.'}</small></div>`;
   $('#mobile-count').textContent=`${count()} ${count()===1?'item':'itens'} no pedido`;$('#mobile-total').textContent=money(total());
+  mountCartV2();
 }
 function cartChanged(){persist();renderGrid();renderCart();}
 function showDialog(html){modal.innerHTML=html;if(!modal.open)modal.showModal();}
@@ -104,6 +107,7 @@ function checkout(){
   showDialog(`${modalHeading(locked?'Verificar confirmação':'Finalizar venda',!state.busy)}${locked?'<p class="retry-note">A resposta da venda não foi confirmada. Consulte ou repita a confirmação com segurança; será mantido o mesmo número de pedido.</p>':''}<div class="payment-total"><small>Total a receber</small><strong>${money(state.pending?.expected_total_cents||total())}</strong></div><div class="payment-options">${Object.entries(paymentLabels).map(([key,label])=>`<button data-payment="${key}" class="${key===checkoutPayment?'active':''}" ${locked?'disabled':''}>${icon(key==='cash'?'cash':key==='pix'?'pix':'card')}${label}</button>`).join('')}</div><div id="cash-field" ${checkoutPayment==='cash'?'':'hidden'}><label class="field"><span>Valor recebido em dinheiro (R$)</span><input id="cash-received" inputmode="decimal" placeholder="0,00" value="${locked?(state.pending.received_cents/100).toFixed(2).replace('.',','):''}" ${locked?'disabled':''}></label><div class="change"><span>Troco</span><strong id="change-value">${locked?money(state.pending.received_cents-state.pending.expected_total_cents):money(0)}</strong></div></div><label class="check"><input id="payment-confirmed" type="checkbox" ${locked?'checked disabled':''}><span>Confirmo que o pagamento foi recebido.<br><span class="muted">O sistema não cobra Pix ou cartão automaticamente.</span></span></label><p id="checkout-error" class="error"></p><div class="dialog-actions"><button class="quiet" data-action="close-modal">Voltar</button><button class="primary" id="confirm-sale" data-action="confirm-sale" ${locked?'':'disabled'}>${locked?'Verificar venda':'Confirmar e salvar'}</button></div>`);
   $('#payment-confirmed').addEventListener('change',validateCheckout);
   $('#cash-received').addEventListener('input',validateCheckout);
+  mountCheckoutV2();
 }
 function parseMoney(value){const v=String(value).trim();if(!/^\d{1,6}([.,]\d{1,2})?$/.test(v))return null;const [whole,dec='']=v.replace(',','.').split('.');return Number(whole)*100+Number(dec.padEnd(2,'0'));}
 function validateCheckout(){
@@ -111,17 +115,19 @@ function validateCheckout(){
   const received=checkoutPayment==='cash'?parseMoney($('#cash-received').value):total();
   $('#change-value').textContent=money(Math.max(0,(received||0)-total()));
   $('#confirm-sale').disabled=!$('#payment-confirmed').checked||received===null||received<total();
+  if($('#save-without-print'))$('#save-without-print').disabled=$('#confirm-sale').disabled;
 }
-async function confirmSale(){
+async function confirmSale(printRequested=true){
   if(state.busy)return;
-  if(!state.pending){validateCheckout();if($('#confirm-sale').disabled)return;state.pending={request_key:crypto.randomUUID(),payment:checkoutPayment,received_cents:checkoutPayment==='cash'?parseMoney($('#cash-received').value):total(),expected_total_cents:total(),items:state.cart.map(({product_id,quantity,price_cents})=>({product_id,quantity,price_cents}))};persist();}
-  state.busy=true;modal.querySelectorAll('button,input').forEach(e=>e.disabled=true);$('#confirm-sale').textContent='Salvando…';$('#checkout-error').textContent='';
+  if(!state.pending){validateCheckout();if($('#confirm-sale').disabled)return;state.pending={request_key:crypto.randomUUID(),payment:checkoutPayment,received_cents:checkoutPayment==='cash'?parseMoney($('#cash-received').value):total(),expected_total_cents:total(),notes:state.notes,discount_cents:state.discount,print_requested:printRequested,items:state.cart.map(({product_id,quantity,price_cents})=>({product_id,quantity,price_cents}))};persist();}
+  printRequested=state.pending.print_requested??printRequested;
+  state.busy=true;modal.querySelectorAll('button,input,textarea').forEach(e=>e.disabled=true);$('#confirm-sale').textContent='Salvando…';$('#checkout-error').textContent='';
   try{
     const {order}=await post('/orders',state.pending);
-    state.pending=null;state.cart=[];persist();state.busy=false;
+    state.pending=null;state.cart=[];state.notes='';state.discount=0;persist();state.busy=false;
     if(state.view==='cashier'){renderGrid();renderCart();}
     showOrderSuccess(order);
-    if(state.settings.auto_print)setTimeout(()=>printOrder(order),150);
+    if(printRequested||state.settings.auto_print)printOrder(order);
   }catch(error){
     state.busy=false;
     if(error.status && error.status>=400 && error.status<500 && ![401,403,408,429].includes(error.status)){state.pending=null;persist();}
@@ -130,34 +136,38 @@ async function confirmSale(){
 }
 function showOrderSuccess(order){
   showDialog(`${modalHeading('Venda concluída')}<div class="success-check">${icon('check')}</div><p class="center small">Pagamento registrado com sucesso.</p><div class="success-number"><small>Pedido</small><strong>${number(order.number)}</strong></div><p class="center small muted">${paymentLabels[order.payment]} · ${money(order.total_cents)}${order.payment==='cash'?`<br>Troco: ${money(order.received_cents-order.total_cents)}`:''}</p><div class="dialog-actions"><button class="secondary" data-print="${order.id}">${icon('print')} Imprimir comanda</button><button class="primary" data-action="close-modal">Nova venda</button></div><p class="print-hint">Se a impressão for cancelada, a venda continua salva. Reimprima na tela Pedidos.</p>`);
+  $('.dialog-actions',modal).insertAdjacentHTML('beforebegin',`<button class="quiet secondary full-width" data-preview="${order.id}">Pré-visualizar comanda</button>`);
 }
 function printOrder(order){
   const width=state.settings.paper_width;
   $('#receipt').className=`paper${width}`;
-  $('#receipt').innerHTML=`<h1>${esc(state.settings.store_name)}</h1><div class="receipt-meta">COMPROVANTE NÃO FISCAL<br>${esc(dateTime(order.created_at))}</div><div class="ticket-number"><small>PEDIDO Nº</small>${number(order.number)}</div><table><tbody>${order.items.map(i=>`<tr><td>${i.quantity}x ${esc(i.name)}</td><td>${money(i.quantity*i.price_cents)}</td></tr>`).join('')}</tbody></table><p class="receipt-total">TOTAL: ${money(order.total_cents)}</p><p>PAGAMENTO: ${paymentLabels[order.payment].toUpperCase()}</p>${order.payment==='cash'?`<p>RECEBIDO: ${money(order.received_cents)}<br>TROCO: ${money(order.received_cents-order.total_cents)}</p>`:''}<p class="receipt-footer">AGUARDE CHAMAR SEU NÚMERO</p>`;
+  $('#receipt').innerHTML=receiptMarkup(order);
   window.print();
 }
 async function renderOrders(append=false){
-  const data=await api(`/orders?status=${state.filter}${append&&state.next?'&before='+state.next:''}`);
+  const data=await api(`/orders?${state.filter==='all'?'':'status='+state.filter}${append&&state.next?'&before='+state.next:''}`);
   if(state.view!=='orders')return;
   state.orders=append?[...state.orders,...data.orders]:data.orders;state.next=data.next;
   $('#content').innerHTML=`${heading('Pedidos','Da confirmação à retirada, tudo em um lugar.','<button class="secondary" data-action="refresh-orders">'+icon('refresh')+' Atualizar</button>')}<div class="toolbar"><select id="order-filter" aria-label="Filtrar pedidos"><option value="queue">Fila de preparo</option>${states.map(s=>`<option value="${s}" ${state.filter===s?'selected':''}>${labels[s]}</option>`).join('')}</select><span class="tag">Atualize para ver alterações de outros aparelhos</span></div><div class="orders-grid">${state.orders.length?state.orders.map(o=>`<article class="order-card"><header><div><span class="order-number">#${number(o.number)}</span><div class="order-time">${dateTime(o.created_at)}</div></div><span class="status ${o.status}">${labels[o.status]}</span></header><div class="order-lines">${o.items.map(i=>`<div class="order-line"><span>${i.quantity}×</span><span>${esc(i.name)}</span></div>`).join('')}<p class="small muted">${paymentLabels[o.payment]} · ${money(o.total_cents)}</p></div><footer>${o.status!=='delivered'?`<button class="primary" data-status-id="${o.id}" data-current-status="${o.status}">${({pending:'Iniciar preparo',preparing:'Marcar como pronto',ready:'Confirmar entrega'})[o.status]}</button>`:'<span class="small muted">Pedido entregue</span>'}<button class="quiet secondary" data-print="${o.id}" aria-label="Imprimir pedido ${number(o.number)}">${icon('print')}</button></footer></article>`).join(''):'<div class="empty-state"><div class="empty-illustration">'+icon('orders')+'</div><h2>Nenhum pedido por aqui</h2><p>As vendas finalizadas aparecem nesta fila.</p></div>'}</div>${data.next?'<button class="load-more" data-action="more-orders">Carregar mais pedidos</button>':''}`;
+  $('#order-filter').insertAdjacentHTML('afterbegin','<option value="all">Todos os pedidos</option>');
   $('#order-filter').value=state.filter;$('#order-filter').addEventListener('change',async e=>{state.filter=e.target.value;await safe(()=>renderOrders());});
+  enhanceOrdersV2();
 }
 function renderProducts(){
   $('#content').innerHTML=`${heading('Produtos','Um cardápio organizado, um caixa mais rápido.','<button class="primary" data-action="new-product">'+icon('plus')+' Novo produto</button>')}<div class="toolbar"><div class="search">${icon('search')}<input id="admin-search" type="search" placeholder="Buscar no cadastro…" aria-label="Buscar no cadastro"></div><button class="secondary" data-action="new-category">Nova categoria</button><button class="quiet secondary" data-action="refresh-products">${icon('refresh')} Atualizar</button></div><div class="panel table-wrap"><table><thead><tr><th>Produto</th><th>Categoria</th><th>Preço</th><th>Situação</th><th></th></tr></thead><tbody id="products-body"></tbody></table></div>`;
   productRows();$('#admin-search').addEventListener('input',e=>productRows(e.target.value));
 }
-function productRows(search=''){$('#products-body').innerHTML=state.products.filter(p=>p.name.toLowerCase().includes(search.toLowerCase())).map(p=>`<tr><td><strong>${esc(p.name)}</strong></td><td>${esc(state.categories.find(c=>c.id===p.category_id)?.name)}</td><td>${money(p.price_cents)}</td><td><span class="status ${p.active?'ready':'delivered'}">${p.active?'Ativo':'Desativado'}</span></td><td><button class="quiet secondary" data-edit="${p.id}">${icon('edit')} Editar</button></td></tr>`).join('')||'<tr><td colspan="5">Nenhum produto encontrado.</td></tr>';}
+function productRows(search=''){$('#products-body').innerHTML=state.products.filter(p=>p.name.toLowerCase().includes(search.toLowerCase())).map(p=>`<tr><td><strong>${esc(p.name)}</strong><div class="small muted">Ordem ${p.display_order||0}</div></td><td>${esc(state.categories.find(c=>c.id===p.category_id)?.name)}</td><td>${money(p.price_cents)}</td><td><span class="status ${p.active&&p.available?'ready':'delivered'}">${!p.active?'Desativado':p.available?'Ativo':'Indisponível'}</span></td><td><button class="quiet secondary" data-edit="${p.id}">${icon('edit')} Editar</button></td></tr>`).join('')||'<tr><td colspan="5">Nenhum produto encontrado.</td></tr>';}
 function productDialog(id){
   const p=state.products.find(p=>p.id===id)||{name:'',price_cents:0,active:true,category_id:state.categories[0]?.id};
   showDialog(`${modalHeading(id?'Editar produto':'Novo produto')}<form id="product-form"><label class="field"><span>Nome do produto</span><input name="name" value="${esc(p.name)}" required maxlength="100"></label><label class="field"><span>Categoria</span><select name="category_id" required>${state.categories.map(c=>`<option value="${c.id}" ${p.category_id===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label><label class="field"><span>Preço (R$)</span><input name="price" inputmode="decimal" value="${p.price_cents?(p.price_cents/100).toFixed(2).replace('.',','):''}" required placeholder="0,00"></label><label class="check"><input name="active" type="checkbox" ${p.active?'checked':''}><span>Disponível para venda</span></label><p class="error" id="form-error"></p><div class="dialog-actions"><button type="button" class="quiet" data-action="close-modal">Cancelar</button><button class="primary" type="submit">Salvar produto</button></div></form>`);
   $('#product-form').addEventListener('submit',async e=>{
     e.preventDefault();const f=new FormData(e.target),price=parseMoney(f.get('price'));if(!price||price>10000000){$('#form-error').textContent='Informe um preço entre R$ 0,01 e R$ 100.000,00.';return;}
     const button=$('[type=submit]',e.target);button.disabled=true;
-    try{await post('/products'+(id?'/'+id:''),{name:f.get('name'),category_id:Number(f.get('category_id')),price_cents:price,active:f.has('active')},id?'PATCH':'POST');await catalog();modal.close();renderProducts();toast('Produto salvo.');}
+    try{await post('/products'+(id?'/'+id:''),{name:f.get('name'),category_id:Number(f.get('category_id')),price_cents:price,active:f.has('active'),available:f.has('available'),display_order:Number(f.get('display_order')||0)},id?'PATCH':'POST');await catalog();modal.close();renderProducts();toast('Produto salvo.');}
     catch(error){$('#form-error').textContent=error.message;button.disabled=false;}
   });
+  mountProductV2(p,id);
 }
 function categoryDialog(){
   showDialog(`${modalHeading('Nova categoria')}<form id="category-form"><label class="field"><span>Nome da categoria</span><input name="name" required maxlength="50" placeholder="Ex.: Sobremesas"></label><p id="form-error" class="error"></p><div class="dialog-actions"><button type="button" class="quiet" data-action="close-modal">Cancelar</button><button class="primary" type="submit">Criar categoria</button></div></form>`);
@@ -170,16 +180,18 @@ async function renderReports(append=false){
   const sum=Number(d.totals.total_cents),ticket=d.totals.count?Math.round(sum/d.totals.count):0;
   $('#content').innerHTML=`${heading('Relatório do caixa','Acompanhe suas vendas com clareza.','<button class="secondary" data-action="refresh-reports">'+icon('refresh')+' Atualizar</button>')}<div class="toolbar"><label class="small" for="report-date">Data das vendas</label><input id="report-date" type="date" value="${reportDate}"><span class="tag">${esc(d.timezone)}</span></div><div class="stats"><div class="stat highlight"><small>Total vendido</small><strong>${money(sum)}</strong></div><div class="stat"><small>Pedidos no dia</small><strong>${d.totals.count}</strong></div><div class="stat"><small>Ticket médio</small><strong>${money(ticket)}</strong></div><div class="stat"><small>Período</small><strong>${reportDate.split('-').reverse().slice(0,2).join('/')}</strong></div></div><div class="stats">${Object.entries(paymentLabels).map(([key,label])=>`<div class="stat"><small>${label}</small><strong>${money(d.payments.find(p=>p.payment===key)?.total_cents||0)}</strong></div>`).join('')}</div><div class="panel"><h2>Histórico de vendas <span class="count-label">· ${d.totals.count} pedidos</span></h2><div class="table-wrap"><table><thead><tr><th>Pedido</th><th>Horário</th><th>Pagamento</th><th>Operador</th><th>Total</th><th>Status</th><th></th></tr></thead><tbody>${reportOrders.map(o=>`<tr><td><strong>#${number(o.number)}</strong></td><td>${time(o.created_at)}</td><td>${paymentLabels[o.payment]}</td><td>${esc(o.operator_name)}</td><td>${money(o.total_cents)}</td><td><span class="status ${o.status}">${labels[o.status]}</span></td><td><button class="quiet secondary" data-print="${o.id}" aria-label="Reimprimir ${number(o.number)}">${icon('print')}</button></td></tr>`).join('')||'<tr><td colspan="7">Nenhuma venda neste dia.</td></tr>'}</tbody></table></div></div>${reportNext?'<button class="load-more" data-action="more-reports">Carregar mais vendas</button>':''}`;
   $('#report-date').addEventListener('change',async e=>{if(!e.target.value)return;reportDate=e.target.value;await safe(()=>renderReports());});
+  enhanceHistoryRows();
 }
 function renderSettings(){
   const s=state.settings;
   $('#content').innerHTML=`${heading('Configurações','Ajustes simples para a rotina da sua equipe.')}<div class="settings-grid"><form class="panel" id="settings-form"><h2>Loja e impressão</h2><label class="field"><span>Nome da petiscaria</span><input name="store_name" value="${esc(s.store_name)}" required maxlength="80"><small>Exibido no sistema e nas comandas.</small></label><label class="field"><span>Largura do papel</span><select name="paper_width"><option value="80" ${s.paper_width===80?'selected':''}>80 mm</option><option value="58" ${s.paper_width===58?'selected':''}>58 mm</option></select></label><label class="field"><span>Fuso horário dos relatórios</span><select name="timezone">${[...new Set(['America/Sao_Paulo','America/Manaus','America/Rio_Branco','America/Noronha',s.timezone])].map(t=>`<option ${s.timezone===t?'selected':''}>${esc(t)}</option>`).join('')}</select></label><label class="check"><input name="auto_print" type="checkbox" ${s.auto_print?'checked':''}><span>Abrir impressão após salvar a venda</span></label><p id="settings-error" class="error"></p><button class="primary" type="submit">Salvar configurações</button></form><div class="panel"><h2>Preparar a impressora</h2><p class="info">Instale a impressora térmica no computador ou use uma impressora compatível com a impressão do celular. Selecione o papel de 58 ou 80 mm no sistema e no driver.</p><p class="info">Na janela de impressão, use escala de 100%, sem cabeçalhos e rodapés. Ajuste as margens conforme o driver da impressora.</p><button class="secondary" data-action="test-print">${icon('print')} Imprimir teste</button><p class="info">O navegador sempre apresenta a janela de impressão. Cancelá-la não cancela uma venda.</p><h2>Contas da equipe</h2><p class="info">O administrador gerencia produtos, configurações e relatórios. O operador acessa o caixa, a fila e a reimpressão.</p><p class="info">As contas são criadas, desativadas e têm suas senhas redefinidas no servidor. Consulte as instruções de implantação entregues com o sistema.</p></div></div>`;
-  $('#settings-form').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target),b=$('[type=submit]',e.target);b.disabled=true;try{state.settings=await post('/settings',{store_name:f.get('store_name'),paper_width:Number(f.get('paper_width')),timezone:f.get('timezone'),auto_print:f.has('auto_print')},'PATCH');shell();toast('Configurações salvas.');}catch(error){$('#settings-error').textContent=error.message;b.disabled=false;}});
+  mountSettingsV2();
+  $('#settings-form').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target),b=$('[type=submit]',e.target);b.disabled=true;try{state.settings=await post('/settings',{store_name:f.get('store_name'),paper_width:Number(f.get('paper_width')),timezone:f.get('timezone'),auto_print:f.has('auto_print'),...settingsV2Payload(f)},'PATCH');applyTheme();shell();toast('Configurações salvas.');}catch(error){$('#settings-error').textContent=error.message;b.disabled=false;}});
 }
 async function safe(fn){try{await fn();}catch(error){toast(error.message);}}
 document.addEventListener('click',async e=>{
   const b=e.target.closest('button');if(!b||b.disabled)return;
-  if(b.dataset.view){state.view=b.dataset.view;shell();return;}
+  if(b.dataset.view){if(b.dataset.view==='pickup'){window.open('/retirada','_blank','noopener');return;}state.view=b.dataset.view;shell();return;}
   if(b.dataset.category){state.category=Number(b.dataset.category);renderCashier();return;}
   if(b.dataset.product){if(state.pending)return;const p=state.products.find(p=>p.id===Number(b.dataset.product)),item=state.cart.find(i=>i.product_id===p.id);if(item&&item.price_cents!==p.price_cents){toast('O preço mudou. Remova o item e adicione novamente.');return;}if(item){if(item.quantity>=99){toast('Limite de 99 unidades por produto.');return;}item.quantity++;}else state.cart.push({product_id:p.id,name:p.name,price_cents:p.price_cents,quantity:1});cartChanged();return;}
   if(b.dataset.qty){if(state.pending)return;const item=state.cart.find(i=>i.product_id===Number(b.dataset.qty));item.quantity=Math.min(99,item.quantity+Number(b.dataset.delta));state.cart=state.cart.filter(i=>i.quantity>0);cartChanged();return;}
@@ -194,7 +206,7 @@ document.addEventListener('click',async e=>{
     case 'confirm-sale':await confirmSale();break;
     case 'show-cart':$('#cart').scrollIntoView({block:'start'});break;
     case 'clear-cart':showDialog(`${modalHeading('Limpar pedido?')}<p class="info">Os itens deste pedido serão removidos. Nenhuma venda será registrada.</p><div class="dialog-actions"><button data-action="close-modal">Voltar</button><button class="danger" data-action="confirm-clear">Limpar pedido</button></div>`);break;
-    case 'confirm-clear':state.cart=[];persist();modal.close();renderCashier();break;
+    case 'confirm-clear':state.cart=[];state.notes='';state.discount=0;persist();modal.close();renderCashier();break;
     case 'refresh-catalog':await catalog();renderCashier();toast('Catálogo atualizado. Revise os preços do pedido antes de finalizar.');break;
     case 'refresh-orders':await renderOrders();break;
     case 'more-orders':await renderOrders(true);break;
@@ -210,4 +222,3 @@ document.addEventListener('click',async e=>{
 modal.addEventListener('cancel',e=>{if(state.busy)e.preventDefault();});
 window.addEventListener('beforeunload',e=>{if(state.busy){e.preventDefault();e.returnValue='';}});
 window.addEventListener('offline',()=>toast('Sem conexão. O pedido continua nesta aba; finalize quando a conexão voltar.'));
-(async()=>{try{const data=await api('/session');state.user=data.user;state.csrf=data.csrf;await catalog();restore();shell();}catch(error){login(error.status===401?'':error.message);}})();

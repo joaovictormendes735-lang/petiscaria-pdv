@@ -1,8 +1,8 @@
-# Petiscaria · PDV
+# Petiscaria · PDV 2.0
 
-Sistema de caixa em português, com frontend em HTML/CSS/JavaScript puro, servidor Node.js e PostgreSQL. A página inicial é o caixa. Inclui fila de preparo, cadastro de produtos e categorias, relatório diário, autenticação e comandas não fiscais de 58/80 mm.
+Sistema de caixa em português, com frontend em HTML/CSS/JavaScript puro, servidor Node.js e PostgreSQL. O operador entra no Caixa e o administrador na Visão geral. Inclui fila de preparo, cadastro de produtos e categorias, relatório diário, autenticação e comandas não fiscais de 58/80 mm.
 
-**Situação da entrega:** código implementado e testado localmente. A publicação e a conexão com um PostgreSQL de produção dependem de configurar a conta de hospedagem, a conexão do banco e o endereço HTTPS da sua loja. Não há banco remoto nem domínio provisionado neste pacote.
+**Homologação publicada:** https://petiscaria-pdv.onrender.com, com PostgreSQL Neon. Consulte ATUALIZACAO-2.0.md para as novidades, migração, controle de caixa, testes e configurações. O pacote não contém as credenciais da hospedagem nem do banco.
 
 ## Começar
 
@@ -108,7 +108,7 @@ As senhas são numéricas, globais e geradas atomicamente por sequência Postgre
 
 Para reimprimir, use o ícone de impressora em **Pedidos** ou **Relatórios**. Cancelar a impressão não desfaz a venda. Se o navegador móvel não oferecer a impressão, use outro aparelho conectado ao mesmo sistema para reimprimir. A impressão não exige uma instalação especial do PDV, mas depende da configuração de impressão do dispositivo.
 
-O comprovante é **não fiscal**. A solução não emite NFC-e, não integra adquirentes, não cancela/refunda vendas concluídas e não oferece controle de estoque. O botão de limpar remove apenas o pedido ainda não vendido.
+O comprovante é **não fiscal**. A solução não emite NFC-e, não integra adquirentes e não oferece controle de estoque. O cancelamento administrativo preserva a venda para auditoria; a devolução financeira é realizada fora do sistema. O botão de limpar remove apenas o pedido ainda não vendido.
 
 ## Contas e segurança
 

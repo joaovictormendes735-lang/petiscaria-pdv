@@ -1,11 +1,19 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import { database, transaction } from '../src/db.js';
 import { passwordHash, validPassword } from '../src/security.js';
 export async function migrate(db) {
-  await transaction(db, async client => { await client.query(await readFile(new URL('../db/001-init.sql',import.meta.url),'utf8')); });
+  await transaction(db, async client => {
+    await client.query(await readFile(new URL('../db/001-init.sql',import.meta.url),'utf8'));
+    await client.query('LOCK TABLE schema_migrations IN EXCLUSIVE MODE');
+    for(const file of (await readdir(new URL('../db/',import.meta.url))).filter(f=>/^\d+.*\.sql$/.test(f)).sort()) {
+      const version=Number(file.split('-')[0]);
+      if(!(await client.query('SELECT version FROM schema_migrations WHERE version=$1',[version])).rows.length)
+        await client.query(await readFile(new URL('../db/'+file,import.meta.url),'utf8'));
+    }
+  });
 }
 export async function seed(db) {
   await transaction(db,async client=>{

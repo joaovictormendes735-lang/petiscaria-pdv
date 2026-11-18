@@ -4,6 +4,7 @@ import { resolve, extname } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { hash, token, passwordVerify } from './security.js';
 import { transaction } from './db.js';
+import { v2Routes, pickup, contrast } from './v2.js';
 
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const fail = (status, message) => { throw new HttpError(status, message); };
@@ -17,7 +18,7 @@ const first = async (db, sql, args = []) => (await db.query(sql, args)).rows[0];
 async function body(req) {
   if (!req.headers['content-type']?.startsWith('application/json')) fail(415, 'Envie dados JSON.');
   let data = '';
-  for await (const part of req) { data += part; if (Buffer.byteLength(data) > 32768) fail(413, 'Dados muito grandes.'); }
+  for await (const part of req) { data += part; if (Buffer.byteLength(data) > 65536) fail(413, 'Dados muito grandes.'); }
   try { const result = JSON.parse(data); if (!result || typeof result !== 'object' || Array.isArray(result)) throw Error(); return result; }
   catch { fail(400, 'JSON inválido.'); }
 }
@@ -43,10 +44,16 @@ export function createApp(db, options = {}) {
     try {
       const url = new URL(req.url, origin), path = url.pathname, method = req.method;
       if (path === '/health' && method === 'GET') { await db.query('SELECT 1'); return send(200,{ ok:true }); }
+      if (path === '/api/pickup' && method === 'GET') return send(200,await pickup(db));
+      if (path === '/theme.css' && method === 'GET') {
+        const s=await first(db,'SELECT primary_color FROM settings WHERE id=1');
+        const color=/^#[0-9a-f]{6}$/i.test(s.primary_color)?s.primary_color:'#16A34A';
+        res.setHeader('Content-Type','text/css; charset=utf-8');return res.end(`:root{--green:${color};--on-green:${contrast(color)}}`);
+      }
       if (!path.startsWith('/api/')) {
         if (!['GET','HEAD'].includes(method)) fail(405,'Método inválido.');
-        const name = path === '/' ? 'index.html' : path.slice(1);
-        if (!['index.html','app.js','style.css','favicon.svg'].includes(name)) fail(404,'Página não encontrada.');
+        const name = ['/', '/retirada', '/retirada/'].includes(path) ? 'index.html' : path.slice(1);
+        if (!['index.html','app.js','v2.js','style.css','favicon.svg'].includes(name)) fail(404,'Página não encontrada.');
         let file = production ? staticCache.get(name) : null;
         if (!file) {
           const raw = await readFile(resolve(staticRoot,name));
@@ -94,35 +101,20 @@ export function createApp(db, options = {}) {
       if (method !== 'GET' && req.headers['x-csrf-token'] !== session.csrf) fail(403,'Sessão inválida. Atualize a página.');
       const admin = () => { if (session.role !== 'admin') fail(403,'Acesso exclusivo do administrador.'); };
       const audit = (client,action,id) => client.query('INSERT INTO audit_log(user_id,action,entity_id) VALUES($1,$2,$3)',[session.id,action,String(id)]);
+      if(await v2Routes({path,method,url,req,db,session,body,fail,admin,audit,send,orderSql}))return;
       if (path === '/api/session' && method === 'GET') return send(200,{ user:publicUser(session), csrf:session.csrf });
       if (path === '/api/logout' && method === 'POST') {
         await db.query('DELETE FROM sessions WHERE token_hash=$1',[hash(rawToken)]);
         res.setHeader('Set-Cookie',cookie('',0)); return send(200,{ ok:true });
       }
       if (path === '/api/catalog' && method === 'GET') {
-        const [categories, products, settings] = await Promise.all([db.query('SELECT * FROM categories ORDER BY id'),db.query(`SELECT * FROM products ${session.role === 'admin' ? '' : 'WHERE active=true'} ORDER BY id`),first(db,'SELECT * FROM settings WHERE id=1')]);
+        const [categories, products, settings] = await Promise.all([db.query('SELECT * FROM categories ORDER BY id'),db.query(`SELECT * FROM products WHERE deleted_at IS NULL ${session.role === 'admin' ? '' : 'AND active=true'} ORDER BY display_order,id`),first(db,'SELECT * FROM settings WHERE id=1')]);
         return send(200,{ categories:categories.rows, products:products.rows, settings });
-      }
-      if (path === '/api/settings' && method === 'PATCH') {
-        admin(); const d=await body(req);
-        if (!text(d.store_name,80) || ![58,80].includes(d.paper_width) || typeof d.auto_print !== 'boolean' || !text(d.timezone,80)) fail(400,'Configurações inválidas.');
-        try { new Intl.DateTimeFormat('pt-BR',{ timeZone:d.timezone }); } catch { fail(400,'Fuso horário inválido.'); }
-        const result = await transaction(db,async client => { const row=await first(client,'UPDATE settings SET store_name=$1,paper_width=$2,auto_print=$3,timezone=$4 WHERE id=1 RETURNING *',[d.store_name.trim(),d.paper_width,d.auto_print,d.timezone]); await audit(client,'settings.update',1); return row; });
-        return send(200,result);
       }
       if (path === '/api/categories' && method === 'POST') {
         admin(); const d=await body(req); if (!text(d.name,50)) fail(400,'Informe um nome de até 50 caracteres.');
         const row = await transaction(db, async client => { const r=await first(client,'INSERT INTO categories(name) VALUES($1) RETURNING *',[d.name.trim()]); await audit(client,'category.create',r.id); return r; });
         return send(201,row);
-      }
-      if ((path === '/api/products' && method === 'POST') || (/^\/api\/products\/\d+$/.test(path) && method === 'PATCH')) {
-        admin(); const d=await body(req);
-        if (!text(d.name,100) || !integer(d.price_cents,1,10000000) || !integer(d.category_id,1,2147483647) || typeof d.active !== 'boolean') fail(400,'Dados do produto inválidos.');
-        const row = await transaction(db,async client => {
-          const values=[d.name.trim(),d.category_id,d.price_cents,d.active];
-          const r= method==='POST' ? await first(client,'INSERT INTO products(name,category_id,price_cents,active) VALUES($1,$2,$3,$4) RETURNING *',values) : await first(client,'UPDATE products SET name=$1,category_id=$2,price_cents=$3,active=$4 WHERE id=$5 RETURNING *',[...values,path.split('/').at(-1)]);
-          if (!r) fail(404,'Produto não encontrado.'); await audit(client,method==='POST'?'product.create':'product.update',r.id); return r;
-        }); return send(method==='POST'?201:200,row);
       }
       if (path === '/api/orders' && method === 'POST') {
         const d=await body(req);
@@ -132,22 +124,32 @@ export function createApp(db, options = {}) {
           return { product_id:i.product_id, quantity:i.quantity, price_cents:i.price_cents };
         }).sort((a,b)=>a.product_id-b.product_id);
         if (new Set(items.map(i=>i.product_id)).size !== items.length) fail(400,'Itens repetidos.');
-        const fingerprint=hash(JSON.stringify({ items,payment:d.payment,received:d.received_cents,total:d.expected_total_cents }));
+        const notes=d.notes??'',discount=d.discount_cents??0;
+        if(typeof notes!=='string'||notes.length>500||!integer(discount,0,100000000))fail(400,'Observação ou desconto inválido.');
+        if(discount>0)admin();
+        const confirmed={items,payment:d.payment,received:d.received_cents,total:d.expected_total_cents};
+        // Mantém a identificação de pedidos pendentes da versão 1.0.
+        if(notes||discount)Object.assign(confirmed,{notes,discount});
+        const fingerprint=hash(JSON.stringify(confirmed));
         const checkReplay = order => { if (order.request_hash!==fingerprint || order.user_id!==session.id) fail(409,'Esta confirmação já foi utilizada em outro pedido.'); return order; };
         const result=await transaction(db,async client=>{
           const existing=await first(client,'SELECT * FROM orders WHERE request_key=$1',[d.request_key]);
           if (existing) return { id:checkReplay(existing).id, replay:true };
+          const shift=await first(client,'SELECT id FROM cash_sessions WHERE closed_at IS NULL FOR SHARE');
+          if(!shift&&(await first(client,'SELECT require_open_cash FROM settings WHERE id=1')).require_open_cash)fail(409,'Abra o caixa antes de finalizar a venda.');
           const products=(await client.query('SELECT * FROM products WHERE id=ANY($1::integer[]) ORDER BY id FOR SHARE',[items.map(i=>i.product_id)])).rows;
           let total=0;
           for (const item of items) {
             const product=products.find(p=>p.id===item.product_id);
             if (!product?.active) fail(409,'Um produto foi desativado. Atualize o catálogo e revise o pedido.');
+            if(!product.available||product.deleted_at)fail(409,'Um produto está indisponível. Revise o pedido.');
             if (product.price_cents!==item.price_cents) fail(409,'Um preço mudou. Atualize o catálogo e revise o pedido.');
             total+=product.price_cents*item.quantity;
           }
-          if (!integer(total,1,100000000) || total!==d.expected_total_cents) fail(409,'O total mudou. Revise o pedido.');
+          const subtotal=total;total-=discount;
+          if (!integer(total,1,100000000) || total!==d.expected_total_cents) fail(409,'O total mudou ou o desconto é inválido. Revise o pedido.');
           if (d.received_cents<total || (d.payment!=='cash' && d.received_cents!==total)) fail(400,'Valor recebido inválido.');
-          const order=await first(client,`INSERT INTO orders(user_id,request_key,request_hash,total_cents,payment,received_cents) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(request_key) DO NOTHING RETURNING *`,[session.id,d.request_key,fingerprint,total,d.payment,d.received_cents]);
+          const order=await first(client,`INSERT INTO orders(user_id,request_key,request_hash,total_cents,payment,received_cents,notes,discount_cents,subtotal_cents,cash_session_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(request_key) DO NOTHING RETURNING *`,[session.id,d.request_key,fingerprint,total,d.payment,d.received_cents,notes,discount,subtotal,shift?.id||null]);
           if (!order) { const replay=checkReplay(await first(client,'SELECT * FROM orders WHERE request_key=$1',[d.request_key])); return { id:replay.id,replay:true }; }
           for (const item of items) await client.query('INSERT INTO order_items(order_id,product_id,name,quantity,price_cents) VALUES($1,$2,$3,$4,$5)',[order.id,item.product_id,products.find(p=>p.id===item.product_id).name,item.quantity,item.price_cents]);
           await audit(client,'order.create',order.id); return { id:order.id,replay:false };
@@ -159,6 +161,7 @@ export function createApp(db, options = {}) {
         if (status && !['queue',...states].includes(status)) fail(400,'Status inválido.');
         if (before && !/^\d{1,18}$/.test(before)) fail(400,'Página inválida.');
         const args=[],where=[];
+        where.push('o.cancelled_at IS NULL');
         if (status==='queue') where.push("o.status!='delivered'");
         else if (status) { args.push(status); where.push(`o.status=$${args.length}`); }
         if (before) { args.push(before); where.push(`o.id<$${args.length}`); }
@@ -173,7 +176,7 @@ export function createApp(db, options = {}) {
         const d=await body(req),id=path.split('/')[3];
         if (!states.includes(d.expected_status) || states.indexOf(d.status)!==states.indexOf(d.expected_status)+1 || !states.includes(d.status)) fail(400,'Transição de status inválida.');
         const order=await transaction(db,async client=>{
-          const row=await first(client,'UPDATE orders SET status=$1 WHERE id=$2 AND status=$3 RETURNING *',[d.status,id,d.expected_status]);
+          const row=await first(client,"UPDATE orders SET status=$1,ready_at=CASE WHEN $1='ready' THEN now() ELSE ready_at END WHERE id=$2 AND status=$3 AND cancelled_at IS NULL RETURNING *",[d.status,id,d.expected_status]);
           if (!row) fail(409,'Pedido alterado por outro atendente. Atualize a fila.'); await audit(client,`order.${d.status}`,id); return row;
         }); return send(200,{ order });
       }
@@ -182,10 +185,10 @@ export function createApp(db, options = {}) {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date||'') || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0,10)!==date) fail(400,'Data inválida.');
         const settings=await first(db,'SELECT timezone FROM settings WHERE id=1');
         const filter="created_at >= ($1::date::timestamp AT TIME ZONE $2) AND created_at < (($1::date+1)::timestamp AT TIME ZONE $2)";
-        const [totals,byPayment]=await Promise.all([first(db,`SELECT count(*)::integer AS count,COALESCE(sum(total_cents),0)::bigint AS total_cents FROM orders WHERE ${filter}`,[date,settings.timezone]),db.query(`SELECT payment,count(*)::integer AS count,sum(total_cents)::bigint AS total_cents FROM orders WHERE ${filter} GROUP BY payment`,[date,settings.timezone])]);
+        const [totals,byPayment,top]=await Promise.all([first(db,`SELECT count(*)::integer AS count,COALESCE(sum(total_cents),0)::bigint AS total_cents FROM orders WHERE cancelled_at IS NULL AND ${filter}`,[date,settings.timezone]),db.query(`SELECT payment,count(*)::integer AS count,sum(total_cents)::bigint AS total_cents FROM orders WHERE cancelled_at IS NULL AND ${filter} GROUP BY payment`,[date,settings.timezone]),db.query(`SELECT i.name,sum(i.quantity)::bigint AS quantity FROM order_items i JOIN orders o ON o.id=i.order_id WHERE o.cancelled_at IS NULL AND ${filter.replaceAll('created_at','o.created_at')} GROUP BY i.product_id,i.name ORDER BY quantity DESC,i.name LIMIT 10`,[date,settings.timezone])]);
         const before=url.searchParams.get('before'); if (before && !/^\d{1,18}$/.test(before)) fail(400,'Página inválida.');
         const history=(await db.query(`${orderSql} WHERE o.${filter.replaceAll('created_at','created_at')} ${before?'AND o.id<$3':''} ORDER BY o.id DESC LIMIT 51`,before?[date,settings.timezone,before]:[date,settings.timezone])).rows;
-        return send(200,{ date,timezone:settings.timezone, totals, payments:byPayment.rows, orders:history.slice(0,50),next:history.length>50?history[49].id:null });
+        return send(200,{ date,timezone:settings.timezone, totals, payments:byPayment.rows, top_products:top.rows, orders:history.slice(0,50),next:history.length>50?history[49].id:null });
       }
       fail(404,'Recurso não encontrado.');
     } catch (error) {
