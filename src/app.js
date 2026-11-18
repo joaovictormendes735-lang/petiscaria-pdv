@@ -24,7 +24,7 @@ async function body(req) {
 const orderSql = `SELECT o.*, u.name AS operator_name, COALESCE((SELECT json_agg(json_build_object('product_id',i.product_id,'name',i.name,'quantity',i.quantity,'price_cents',i.price_cents) ORDER BY i.id) FROM order_items i WHERE i.order_id=o.id),'[]') AS items FROM orders o JOIN users u ON u.id=o.user_id`;
 export function createApp(db, options = {}) {
   const production = options.production ?? process.env.NODE_ENV === 'production';
-  const origin = options.origin ?? process.env.APP_ORIGIN ?? 'http://localhost:3000';
+  const origin = options.origin ?? process.env.APP_ORIGIN ?? process.env.RENDER_EXTERNAL_URL ?? 'http://localhost:3000';
   const sessionHours = Number(process.env.SESSION_HOURS || 12);
   if (!integer(sessionHours,1,24)) throw Error('SESSION_HOURS deve estar entre 1 e 24.');
   if (production && new URL(origin).protocol !== 'https:') throw Error('APP_ORIGIN deve usar HTTPS em produção.');
